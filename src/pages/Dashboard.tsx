@@ -210,53 +210,107 @@ export default function Dashboard() {
       addLog("T3", "审批员通过涉密申请", "fail", e.message);
     }
 
-    // 测试4：盘点中的架位禁止派单（拦截）
+    // 测试4：盘点中的架位禁止派单（拦截）- 主动构造数据
     addLog("T4", "盘点架位拦截派单验证", "pending");
     await wait(400);
     try {
-      // 找一个已批准申请且档案所在架位正在盘点
-      const approvedApps = useStore
+      // 1. 找到盘点中的架位
+      const inventoryShelf = useStore.getState().shelves.find((s) => s.status === "inventory");
+      if (!inventoryShelf) throw new Error("未找到盘点中的架位");
+
+      // 2. 找到一个位于该架位且状态为 in_shelf 的非涉密档案（公开/内部，创建后直接approved）
+      const inventoryShelfArchives = useStore
         .getState()
-        .applications.filter((a) => a.status === "approved");
-      let targetApp: Application | undefined;
-      for (const app of approvedApps) {
-        const arc = useStore.getState().getArchiveById(app.archive_id);
-        const shelf = arc ? useStore.getState().getShelfById(arc.shelf_id) : undefined;
-        if (shelf?.status === "inventory") {
-          targetApp = app;
-          break;
+        .getArchivesByShelf(inventoryShelf.id);
+      const availableArc = inventoryShelfArchives.find(
+        (a) => a.status === "in_shelf" && (a.level === "公开" || a.level === "内部")
+      );
+      if (!availableArc) throw new Error("盘点架位上无可调阅非涉密档案");
+
+      // 3. 创建申请（非涉密自动直接approved状态）
+      const createResult = createApplication({
+        archive_id: availableArc.id,
+        user_id: "u001",
+        reason: "回归测试-盘点架位拦截派单验证",
+        expect_read_time: formatDate(addDays(new Date(), 1)),
+      });
+      if (!createResult.success || !createResult.id) {
+        throw new Error("创建盘点架位申请失败: " + createResult.message);
+      }
+
+      // 4. 确认申请状态已为approved（非涉密直接通过）
+      const t4App = useStore.getState().getApplicationById(createResult.id);
+      if (!t4App) throw new Error("未找到刚创建的申请");
+      if (t4App.status !== "approved") {
+        // 如果是涉密则需先审批通过（以防刚才的过滤条件失效）
+        if (t4App.status === "pending_approval") {
+          const canApprove = canApproveApplication(t4App);
+          if (!canApprove.success) throw new Error("申请无法审批: " + canApprove.message);
+          approveApplication(t4App.id, "u007", "回归测试自动审批");
+        } else {
+          throw new Error("申请状态异常，无法继续派单: " + t4App.status);
         }
       }
-      if (!targetApp) throw new Error("未找到对应盘点架位的已批准申请");
-      const result = createDispatch(targetApp.id, "u002");
-      if (result.success) throw new Error("盘点架位派单应被拦截");
-      addLog("T4", "盘点架位拦截派单验证", "pass", `拦截信息: ${result.message}`);
+      const approved4 = useStore.getState().getApplicationById(t4App.id);
+      if (approved4?.status !== "approved") {
+        throw new Error("申请未达到approved状态: " + approved4?.status);
+      }
+
+      // 5. 实际调用派单逻辑 → 必须被拦截
+      const result = createDispatch(approved4.id, "u003");
+      if (result.success) throw new Error("盘点架位派单应被拦截但实际成功");
+      const expectedKeyword = "正在盘点";
+      if (!result.message || !result.message.includes(expectedKeyword)) {
+        throw new Error("拦截信息应包含'" + expectedKeyword + "'，实际: " + result.message);
+      }
+      addLog("T4", "盘点架位拦截派单验证", "pass",
+        `架位=${inventoryShelf.code}，档案=${availableArc.code}，拦截信息: ${result.message}`
+      );
     } catch (e: any) {
       addLog("T4", "盘点架位拦截派单验证", "fail", e.message);
     }
 
-    // 测试5：正常架位成功派单
+    // 测试5：正常架位成功派单 - 主动构造数据
     addLog("T5", "正常架位派单出库验证", "pending");
     await wait(400);
     try {
-      const approvedApps = useStore
-        .getState()
-        .applications.filter((a) => a.status === "approved");
-      let targetApp: Application | undefined;
-      for (const app of approvedApps) {
-        const arc = useStore.getState().getArchiveById(app.archive_id);
-        const shelf = arc ? useStore.getState().getShelfById(arc.shelf_id) : undefined;
-        if (shelf?.status === "normal") {
-          targetApp = app;
-          break;
-        }
+      // 1. 找一个正常状态的架位
+      const normalShelf = useStore.getState().shelves.find(
+        (s) => s.status === "normal" && s.id !== "shelf_003"
+      );
+      if (!normalShelf) throw new Error("未找到正常状态架位");
+
+      // 2. 找一个位于该架位且 in_shelf 的非涉密档案
+      const shelfArchives = useStore.getState().getArchivesByShelf(normalShelf.id);
+      const availableArc = shelfArchives.find(
+        (a) => a.status === "in_shelf" && (a.level === "公开" || a.level === "内部")
+      );
+      if (!availableArc) throw new Error("正常架位上无可调阅档案");
+
+      // 3. 创建申请
+      const createResult = createApplication({
+        archive_id: availableArc.id,
+        user_id: "u001",
+        reason: "回归测试-正常架位派单",
+        expect_read_time: formatDate(addDays(new Date(), 1)),
+      });
+      if (!createResult.success || !createResult.id) {
+        throw new Error("创建正常架位申请失败: " + createResult.message);
       }
-      if (!targetApp) throw new Error("未找到可派单的已批准申请");
-      const result = createDispatch(targetApp.id, "u002");
-      if (!result.success) throw new Error("派单失败: " + result.message);
-      const updated = useStore.getState().applications.find((a) => a.id === targetApp!.id);
-      if (updated?.status !== "dispatching") throw new Error("派单后状态异常");
-      addLog("T5", "正常架位派单出库验证", "pass", `派单后状态=${updated.status}`);
+      const t5App = useStore.getState().getApplicationById(createResult.id);
+      if (!t5App) throw new Error("申请未找到");
+      if (t5App.status !== "approved") {
+        throw new Error("申请状态应为approved: " + t5App.status);
+      }
+
+      // 4. 调用派单 → 必须成功
+      const result = createDispatch(t5App.id, "u003");
+      if (!result.success) throw new Error("正常派单失败: " + result.message);
+      const updated = useStore.getState().applications.find((a) => a.id === t5App.id);
+      if (updated?.status !== "dispatching") throw new Error("派单后状态异常: " + updated?.status);
+      addLog("T5", "正常架位派单出库验证", "pass",
+        `架位=${normalShelf.code}，档案=${availableArc.code}，派单后状态=${updated.status}`
+      );
     } catch (e: any) {
       addLog("T5", "正常架位派单出库验证", "fail", e.message);
     }
